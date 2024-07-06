@@ -561,9 +561,9 @@ bool TeleClientHTTP::transmit(const char* packetBuffer, unsigned int packetSize)
 #else
   if (strlen(USER_EMAIL) == 0 || USER_EMAIL == NULL)
   {
-    len = snprintf(url, sizeof(url), "%s/post/%s/%s", SERVER_PATH, devid, "unknown");
+    len = snprintf(url, sizeof(url), "%s/post/%s/%s/%s", SERVER_PATH, devid, "unknown", vin);
   } else {
-    len = snprintf(url, sizeof(url), "%s/post/%s/%s", SERVER_PATH, devid, USER_EMAIL);
+    len = snprintf(url, sizeof(url), "%s/post/%s/%s/%s", SERVER_PATH, devid, USER_EMAIL, vin);
   }
   // len = snprintf(url, sizeof(url), "%s/post/%s/%s", SERVER_PATH, devid, USER_EMAIL);
   // Serial.println(url);
