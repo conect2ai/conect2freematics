@@ -347,7 +347,7 @@ bool COBD::isValidPID(byte pid)
 
 bool COBD::init(OBD_PROTOCOLS protocol, bool quick)
 {
-	const char *initcmd[] = {"ATE0\r", "ATH0\r"};
+	const char *initcmd[] = {"ATE0\r", "ATH0\r", "ATM0\r", "ATAT1\r"};
 	char buffer[64];
 	bool success = false;
 
