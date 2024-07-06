@@ -9,7 +9,7 @@
 # Conect2AI Freematics One+ Implementation
 
 
-The objective of this repository is to host the Conect2AI adaptation of the Freematics One+ platform. Relative to the [original implementation](https://github.com/stanleyhuangyc/Freematics/blob/master/firmware_v5/telelogger/telelogger.ino), notable enhancements include the incorporation of an email transmission feature within the server routing mechanism, as well as the integration of clock synchronization functionality utilizing an [NTP (Network Time Protocol) server](https://github.com/arduino-libraries/NTPClient).
+The objective of this repository is to host the Conect2AI adaptation of the Freematics One+ platform. Relative to the [original implementation](https://github.com/stanleyhuangyc/Freematics/blob/master/firmware_v5/telelogger/telelogger.ino), the improvements made include the transmission of email on the server route, as well as the integration of clock synchronization functionality utilizing an [NTP (Network Time Protocol) server](https://github.com/arduino-libraries/NTPClient).
 
 
 ## :rocket: How to Execute
@@ -156,6 +156,31 @@ void processOBD(CBuffer* buffer)
   int kph = obdData[0].value;
   if (kph >= 2) lastMotionTime = millis();
 }
+```
+
+## AT Commands
+
+During the hardware initialization process, additional AT commands have been integrated. The modified file,  [FreematicsOBD.cpp](./libraries/FreematicsPlus/FreematicsOBD.cpp), now includes the ATM0 and ATAT1 commands as part of its initialization sequence.
+
+```c
+// FreematicsOBD.cpp file
+
+const char *initcmd[] = {"ATE0\r", "ATH0\r", "ATM0\r", "ATAT1\r"};
+```
+
+## Email and VIN
+
+To ensure unique identification of each trip on the server, the Email and Vehicle Identification Number (VIN) have been incorporated into the data transmission route. The following code snippet from the [teleclient.cpp](./firmware_v5/telelogger/teleclient.cpp) file illustrates these modifications.
+
+```c
+// teleclient.cpp file
+
+if (strlen(USER_EMAIL) == 0 || USER_EMAIL == NULL)
+  {
+    len = snprintf(url, sizeof(url), "%s/post/%s/%s/%s", SERVER_PATH, devid, "unknown", vin);
+  } else {
+    len = snprintf(url, sizeof(url), "%s/post/%s/%s/%s", SERVER_PATH, devid, USER_EMAIL, vin);
+  }
 ```
 
 ## :page_facing_up: License
