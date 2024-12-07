@@ -21,9 +21,8 @@
 #include "telestore.h"
 #include "teleclient.h"
 #include "telemesh.h"
-#include <WiFiUdp.h>
-#include <NTPClient.h>
-#include "time.h"
+#include <apps/sntp/sntp.h>
+#include <SD.h>
 #if BOARD_HAS_PSRAM
 #include "esp32/himem.h"
 #endif
@@ -33,6 +32,12 @@
 #if ENABLE_OLED
 #include "FreematicsOLED.h"
 #endif
+
+#undef INFO
+#define INFO FREEMATICS_INFO
+
+#undef INFO
+#define INFO 0x01
 
 // states
 #define STATE_STORAGE_READY 0x1
@@ -45,9 +50,17 @@
 #define STATE_WORKING 0x80
 #define STATE_STANDBY 0x100
 
+byte application_id_flag = 0xB0;
 byte time_session_flag = 0xB8;
 
+int count_date = 0;
+bool has_51 = false;
+bool has_52 = false;
+bool made_prediction = false;
+// bool time_writed = false;
+bool time_compared = false;
 
+ 
 typedef struct {
   byte pid;
   byte tier;
@@ -58,29 +71,42 @@ typedef struct {
 PID_POLLING_INFO obdData[]= {
   {PID_ENGINE_LOAD, 1},
   {PID_RPM, 1},
-  {PID_MAF_FLOW, 1},
-  {PID_INTAKE_TEMP, 1},
+  {PID_SPEED, 1},
+  {PID_THROTTLE, 1},
   {PID_TIMING_ADVANCE, 1},
-  {PID_MAF_FLOW, 1},
+  {PID_INTAKE_MAP, 1},
+  {PID_AIR_FUEL_EQUIV_RATIO, 1},
+  {PID_INTAKE_TEMP, 1},
+  {PID_FUEL_TYPE, 1},
+  {PID_ETHANOL_FUEL, 1},
+  {PID_COOLANT_TEMP, 1},
+  {PID_BATTERY_VOLTAGE, 1},
+  {PID_FUEL_LEVEL, 1},
 };
+
+time_t timestamp;
+long int time_session;
+extern long int time_server;
+extern bool time_server_obtained;
+int prediction;
+bool send_data = false;
+
+void verifyIfFileExists(String filename){
+    if (!SD.exists(filename)) {
+        Serial.println(filename + " does not exist");
+        // Cria um novo arquivo com valor inicial (0 ou outro valor padrão)
+        File file = SD.open(filename, FILE_WRITE);
+        if (!file) {
+            Serial.println("Failed to create file for writing");
+            return;
+        }
+        file.println(0); // Escreve o valor inicial
+        file.close();
+    }
+}
 
 CBufferManager bufman;
 Task subtask;
-// char timeString[40];
-time_t timestamp;
-
-void printLocalTime(){
-  struct tm timeinfo;
-  
-  if(!getLocalTime(&timeinfo)){
-    Serial.println("Failed to obtain time");
-    return;
-  }
-
-// Converter a estrutura tm em um timestamp UNIX
-  timestamp = mktime(&timeinfo);
-  Serial.println(timestamp); // Imprimir o timestamp UNIX 
-}
 
 #if ENABLE_MEMS
 float accBias[3] = {0}; // calibrated reference accelerometer data
@@ -93,7 +119,7 @@ uint8_t accCount = 0;
 int deviceTemp = 0;
 
 // config data
-char apn[32] = CELL_APN;
+char apn[32];
 #if ENABLE_WIFI
 char wifiSSID[32] = WIFI_SSID;
 char wifiPassword[32] = WIFI_PASSWORD;
@@ -252,13 +278,139 @@ int handlerLiveData(UrlHandlerParam* param)
   Reading and processing OBD data
 *******************************************************************************/
 #if ENABLE_OBD
+
+int readFlag = 0; 
+uint8_t time_sd_flag;
+
 void processOBD(CBuffer* buffer)
 {
-  
   static int idx[2] = {0, 0};
   int tier = 1;
-  for (byte i = 0; i < sizeof(obdData) / sizeof(obdData[0]); i++) {
 
+  /* STARTING THE PIECE OF CODE THAT WILL BE RESPONSIBLE FOR THE TIME SESSION
+  * 1. Read the time from the RTC
+  * 2. Compare the time with the last time the data was sent. This time is stored in the "time.txt" file
+  * 3. If the difference is greater than 120 seconds, a new session has started
+  * 4. If the difference is less than 120 seconds, the last session has not finished yet.
+  * 5. In the first case, update the time_session in the file
+  * 6. In the second case, read the time_session from the file
+  * 7. Write the time_stamp in the file to register the last time the data was sent
+  */
+  if (!time_server_obtained){
+    time_session = 0;
+    Serial.println("TIME SERVER NOT OBTAINED");
+  } else {
+    Serial.println("TIME SERVER OBTAINED");
+    Serial.println(time_server);
+    time_session = time_server;
+  }
+
+  if (count_date == 0 && time_server_obtained){
+    // syncronize the timestamp with the server
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    tv.tv_sec = time_server;
+    timestamp = tv.tv_sec;
+  }
+
+  // Serial.println("TIME STAMP");
+  // Serial.println(timestamp);
+  // file.print(timestamp);
+  // file.close();
+
+  if (!time_compared && time_server_obtained){
+
+    // Verify if the file time.txt exists
+    verifyIfFileExists("/time.txt");
+
+    // Verify if the file time_session.txt exists
+    verifyIfFileExists("/time_session.txt");
+
+    // 2. Compare the time with the last time the data was sent. This time is stored in the "time.txt" file
+    File file = SD.open("/time.txt", FILE_READ);
+    if (!file) {
+      Serial.println("Failed to open file for reading");
+      return;
+    }
+
+    String lastTimeStr = file.readStringUntil('\n');
+    file.close();
+
+    // Serial.println("LAST TIME STRING");
+    // Serial.println(lastTimeStr);
+
+    // transform the string into a time_t
+    time_t last_time = lastTimeStr.toInt();
+    // Serial.println("LAST TIME");
+    // Serial.println(last_time);
+
+    // get the absolute difference between time_session and lastTime
+    int diff = timestamp - last_time;
+    Serial.println("DIFFERENCE");
+    Serial.println(diff);
+
+    // 3. If the difference is greater than 120 seconds, a new session has started
+    if (diff > 120){
+      // print the time_session
+      Serial.println("A NEW SESSION HAS STARTED");
+      
+      time_session = timestamp;
+      Serial.println(time_session);
+      // update the time_session in the file
+      File file = SD.open("/time_session.txt", FILE_WRITE);
+      if (!file) {
+        Serial.println("Failed to open file for writing");
+        return;
+      }
+
+      // 5. In the first case, update the time_session in the file
+      file.print(time_session);
+      file.close();
+    } else {
+      // 4. If the difference is less than 120 seconds, the last session has not finished yet.
+      Serial.println("THE LAST SESSION HAS NOT FINISHED YET");
+      
+      File file = SD.open("/time_session.txt", FILE_READ);
+      if (!file) {
+        Serial.println("Failed to open file for reading");
+        return;
+      }
+
+      String lastTimeStr = file.readStringUntil('\n');
+      file.close();
+
+      // 6. In the second case, read the time_session from the file
+      time_session = lastTimeStr.toInt();
+    }
+
+    time_compared = true;
+  }
+
+  // 7. Write the time_stamp in the file to register the last time the data was sent
+
+  if(time_server_obtained){
+    File file = SD.open("/time.txt", FILE_WRITE);
+    if (!file) {
+      Serial.println("Failed to open file for writing");
+      return;
+    }
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    timestamp = tv.tv_sec + time_session;
+    // Serial.println("[WRITING FILE] TIME STAMP");
+    // Serial.println(timestamp);
+    file.print(timestamp);
+    file.close();
+  }
+
+  made_prediction = false;
+
+  // -------------------------------------------------------------------------------------
+
+  buffer->add(time_session_flag, ELEMENT_INT32, &time_session, sizeof(time_session));
+
+  for (byte i = 0; i < sizeof(obdData) / sizeof(obdData[0]); i++) {
     if (obdData[i].tier > tier) {
         // reset previous tier index
         idx[tier - 2] = 0;
@@ -274,28 +426,76 @@ void processOBD(CBuffer* buffer)
         }
     }
     byte pid = obdData[i].pid;
-    if (!obd.isValidPID(pid)) continue;
+    if (!obd.isValidPID(pid)){
+      // print the PID that is not valid
+      Serial.print("PID ");
+      Serial.print(pid, HEX);
+      Serial.println(" is not valid");
+      continue;
+    }
+
     int value;
+    bool success = false;
     if (obd.readPID(pid, value)) {
         obdData[i].ts = millis();
         obdData[i].value = value;
 
-        buffer->add((uint16_t)pid | 0x100, ELEMENT_INT32, &value, sizeof(value));
+        // start
+        // gettimeofday(&total_start, NULL);
+
+        if (pid == PID_FUEL_TYPE) {
+          has_51 = true;
+          prediction = value;
+          buffer->add((uint16_t)pid | 0x100, ELEMENT_INT32, &value, sizeof(value));
+        } else if (pid == PID_TIMING_ADVANCE) {
+          buffer->add((uint16_t)pid | 0x100, ELEMENT_INT32, &value, sizeof(value));
+        } else if (pid == PID_COOLANT_TEMP) {
+          buffer->add((uint16_t)pid | 0x100, ELEMENT_INT32, &value, sizeof(value));
+        } else if (pid == PID_ETHANOL_FUEL){
+          has_52 = true;
+          buffer->add((uint16_t)pid | 0x100, ELEMENT_INT32, &value, sizeof(value));
+        } else if (pid == PID_CONTROL_MODULE_VOLTAGE) {
+          value = value / 100;
+          buffer->add((uint16_t)pid | 0x100, ELEMENT_INT32, &value, sizeof(value));
+        } else {
+          buffer->add((uint16_t)pid | 0x100, ELEMENT_INT32, &value, sizeof(value));
+        }
+
     } else {
         timeoutsOBD++;
         printTimeoutStats();
         break;
     }
+
     if (tier > 1) break;
   }
+
+  int application_id = 1;
+  buffer->add(application_id_flag, ELEMENT_INT32, &application_id, sizeof(application_id));
+  
   int kph = obdData[0].value;
   if (kph >= 2) lastMotionTime = millis();
 }
 #endif
 
+bool initGPS()
+{
+  // start GNSS receiver
+  if (sys.gpsBeginExt()) {
+    Serial.println("GNSS:OK(E)");
+  } else if (sys.gpsBegin()) {
+    Serial.println("GNSS:OK(I)");
+  } else {
+    Serial.println("GNSS:NO");
+    return false;
+  }
+  return true;
+}
+
 bool processGPS(CBuffer* buffer)
 {
   static uint32_t lastGPStime = 0;
+  static uint32_t lastGPStick = 0;
   static float lastGPSLat = 0;
   static float lastGPSLng = 0;
 
@@ -304,7 +504,7 @@ bool processGPS(CBuffer* buffer)
     lastGPSLat = 0;
     lastGPSLng = 0;
   }
-#if GNSS == GNSS_INTERNAL || GNSS == GNSS_EXTERNAL
+#if GNSS == GNSS_STANDALONE
   if (state.check(STATE_GPS_READY)) {
     // read parsed GPS data
     if (!sys.gpsGetData(&gd)) {
@@ -317,21 +517,29 @@ bool processGPS(CBuffer* buffer)
     }
 #endif
 
-  if (!gd || lastGPStime == gd->time || gd->date == 0 || (gd->lng == 0 && gd->lat == 0)){ 
-    // Serial.print("Entrei no primeiro");
+
+  if (!gd || lastGPStime == gd->time || (gd->lng == 0 && gd->lat == 0)) {
+#if GNSS_RESET_TIMEOUT
+    if (millis() - lastGPStick > GNSS_RESET_TIMEOUT * 1000) {
+      sys.gpsEnd();
+      delay(50);
+      initGPS();
+      lastGPStick = millis();
+    }
+#endif
     return false;
   }
+  lastGPStick = millis();
 
-  if ((lastGPSLat || lastGPSLng) && (abs(gd->lat - lastGPSLat) > 0.001 || abs(gd->lng - lastGPSLng > 0.001))) {
+  if ((lastGPSLat || lastGPSLng) && (abs(gd->lat - lastGPSLat) > 0.001 || abs(gd->lng - lastGPSLng) > 0.001)) {
     // invalid coordinates data
     lastGPSLat = 0;
     lastGPSLng = 0;
-    // Serial.print("Entrei no segundo");
     return false;
   }
   lastGPSLat = gd->lat;
   lastGPSLng = gd->lng;
-  
+
   float kph = gd->speed * 1.852f;
   if (kph >= 2) lastMotionTime = millis();
 
@@ -347,6 +555,11 @@ bool processGPS(CBuffer* buffer)
   }
   
   // generate ISO time string
+  // last_time_syncronized = gd->time;
+
+  // if (last_time_syncronized > 1718389103 && !syncronized){
+  //   syncronized = true;
+  // }
   char *p = isoTime + sprintf(isoTime, "%04u-%02u-%02uT%02u:%02u:%02u",
       (unsigned int)(gd->date % 100) + 2000, (unsigned int)(gd->date / 100) % 100, (unsigned int)(gd->date / 10000),
       (unsigned int)(gd->time / 1000000), (unsigned int)(gd->time % 1000000) / 10000, (unsigned int)(gd->time % 10000) / 100);
@@ -507,27 +720,13 @@ void initialize()
   }
 #endif
 
-#if GNSS == GNSS_INTERNAL || GNSS == GNSS_EXTERNAL
-  // start GPS receiver
+#if GNSS == GNSS_STANDALONE
   if (!state.check(STATE_GPS_READY)) {
-#if GNSS == GNSS_EXTERNAL
-    if (sys.gpsBeginExt())
-#else
-    if (sys.gpsBegin())
-#endif
-    {
+    if (initGPS()) {
       state.set(STATE_GPS_READY);
-      Serial.println("GNSS:OK");
-#if ENABLE_OLED
-      oled.println("GNSS OK");
-#endif
-    } else {
-      Serial.println("GNSS:NO");
     }
   }
 #endif
-
-showSysInfo();
 
 #if ENABLE_OBD
   // initialize OBD communication
@@ -676,18 +875,13 @@ void process()
 {
   uint32_t startTime = millis();
 
-  // Serial.print("[TIME] ");
-  // Serial.println(startTime);
-
   CBuffer* buffer = bufman.getFree();
   buffer->state = BUFFER_STATE_FILLING;
-
-  // Serial.println(currentDateTime);
 
 #if ENABLE_OBD
   // process OBD data if connected
   if (state.check(STATE_OBD_READY)) {
-    processOBD(buffer);
+      processOBD(buffer);
     if (obd.errors >= MAX_OBD_ERRORS) {
       if (!obd.init()) {
         Serial.println("[OBD] ECU OFF");
@@ -733,6 +927,7 @@ void process()
   buffer->add(PID_DEVICE_TEMP, ELEMENT_INT32, &deviceTemp, sizeof(deviceTemp));
 
   buffer->timestamp = millis();
+  
   buffer->state = BUFFER_STATE_FILLED;
 
   // display file buffer stats
@@ -817,7 +1012,7 @@ bool initCell(bool quick = false)
     Serial.print("APN:");
     Serial.println(apn);
   }
-  if (teleClient.cell.setup(apn)) {
+  if (teleClient.cell.setup(apn, "claro", "claro")) {
     netop = teleClient.cell.getOperatorName();
     if (netop.length()) {
       Serial.print("Operator:");
@@ -870,7 +1065,7 @@ void telemetry(void* inst)
   uint8_t connErrors = 0;
   CStorageRAM store;
   store.init(
-#if HAS_LARGE_RAM
+#if BOARD_HAS_PSRAM
     (char*)heap_caps_malloc(SERIALIZE_BUFFER_SIZE, MALLOC_CAP_SPIRAM),
 #else
     (char*)malloc(SERIALIZE_BUFFER_SIZE),
@@ -898,9 +1093,11 @@ void telemetry(void* inst)
       if (state.check(STATE_STANDBY)) {
         // start ping
 #if ENABLE_WIFI
-        Serial.print("[WIFI] Joining SSID:");
-        Serial.println(wifiSSID);
-        teleClient.wifi.begin(wifiSSID, wifiPassword);
+        if (wifiSSID[0]) { 
+          Serial.print("[WIFI] Joining SSID:");
+          Serial.println(wifiSSID);
+          teleClient.wifi.begin(wifiSSID, wifiPassword);
+        }
         if (teleClient.wifi.setup()) {
           Serial.println("[WIFI] Ping...");
           teleClient.ping();
@@ -920,53 +1117,38 @@ void telemetry(void* inst)
     }
 
 #if ENABLE_WIFI
-    if (!state.check(STATE_WIFI_CONNECTED)) {
+    if (wifiSSID[0] && !state.check(STATE_WIFI_CONNECTED)) {
       Serial.print("[WIFI] Joining SSID:");
       Serial.println(wifiSSID);
       teleClient.wifi.begin(wifiSSID, wifiPassword);
       teleClient.wifi.setup();
-      initCell(true);
     }
 #endif
 
     while (state.check(STATE_WORKING)) {
 #if ENABLE_WIFI
-      if (!state.check(STATE_WIFI_CONNECTED) && teleClient.wifi.connected()) {
-        ip = teleClient.wifi.getIP();
-        if (ip.length()) {
-          Serial.print("[WIFI] IP:");
-          Serial.println(ip);
-
-          // WiFiUDP ntpUDP;
-          // NTPClient timeClient(ntpUDP, "b.st1.ntp.br", 3*3600); // Servidor NTP no Brasil e ajuste de fuso horário para GMT-3 (Brasília)
-
-          // Serial.print("[FORMATTED TIME] ");
-          // // char currentDateTime[32];
-          // Serial.println(timeClient.getEpochTime());
-
-          // const char* ntpServer = "pool.ntp.org";
-          const char* ntpServer = "b.st1.ntp.br";
-          const long  gmtOffset_sec = 0;
-          const int   daylightOffset_sec = -3*3600;
-
-          // Init and get the time
-          configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-          printLocalTime();
-        }
-        connErrors = 0;
-        if (teleClient.connect()) {
-          state.set(STATE_WIFI_CONNECTED | STATE_NET_READY);
-          beep(50);
-          // switch off cellular module when wifi connected
-          if (state.check(STATE_CELL_CONNECTED)) {
-            teleClient.cell.end();
-            state.clear(STATE_CELL_CONNECTED);
-            Serial.println("[CELL] Deactivated");
+      if (wifiSSID[0]) {
+        if (!state.check(STATE_WIFI_CONNECTED) && teleClient.wifi.connected()) {
+          ip = teleClient.wifi.getIP();
+          if (ip.length()) {
+            Serial.print("[WIFI] IP:");
+            Serial.println(ip);
           }
+          connErrors = 0;
+          if (teleClient.connect()) {
+            state.set(STATE_WIFI_CONNECTED | STATE_NET_READY);
+            beep(50);
+            // switch off cellular module when wifi connected
+            if (state.check(STATE_CELL_CONNECTED)) {
+              teleClient.cell.end();
+              state.clear(STATE_CELL_CONNECTED);
+              Serial.println("[CELL] Deactivated");
+            }
+          }
+        } else if (state.check(STATE_WIFI_CONNECTED) && !teleClient.wifi.connected()) {
+          Serial.println("[WIFI] Disconnected");
+          state.clear(STATE_WIFI_CONNECTED);
         }
-      } else if (state.check(STATE_WIFI_CONNECTED) && !teleClient.wifi.connected()) {
-        Serial.println("[WIFI] Disconnected");
-        state.clear(STATE_WIFI_CONNECTED);
       }
 #endif
       if (!state.check(STATE_WIFI_CONNECTED) && !state.check(STATE_CELL_CONNECTED)) {
@@ -1000,7 +1182,7 @@ void telemetry(void* inst)
         lastRssiTime = millis();
 
 #if ENABLE_WIFI
-        if (!state.check(STATE_WIFI_CONNECTED)) {
+        if (wifiSSID[0] && !state.check(STATE_WIFI_CONNECTED)) {
           teleClient.wifi.begin(wifiSSID, wifiPassword);
         }
 #endif
@@ -1099,7 +1281,7 @@ void standby()
   }
 #endif
 
-#if !GNSS_ALWAYS_ON && (GNSS == GNSS_INTERNAL || GNSS == GNSS_EXTERNAL)
+#if !GNSS_ALWAYS_ON && GNSS == GNSS_STANDALONE
   if (state.check(STATE_GPS_READY)) {
     Serial.println("[GPS] OFF");
     sys.gpsEnd(true);
@@ -1173,9 +1355,11 @@ void showSysInfo()
   Serial.print(ESP.getHeapSize() >> 10);
   Serial.print("KB");
 #if BOARD_HAS_PSRAM
-  Serial.print(" PSRAM:");
-  Serial.print(esp_spiram_get_size() >> 20);
-  Serial.print("MB");
+  if (psramInit()) {
+    Serial.print(" PSRAM:");
+    Serial.print(esp_spiram_get_size() >> 20);
+    Serial.print("MB");
+  }
 #endif
   Serial.println();
 
@@ -1206,7 +1390,12 @@ void loadConfig()
 {
   size_t len;
   len = sizeof(apn);
+  apn[0] = 0;
   nvs_get_str(nvs, "CELL_APN", apn, &len);
+  if (!apn[0]) {
+    strcpy(apn, CELL_APN);
+  }
+
 #if ENABLE_WIFI
   len = sizeof(wifiSSID);
   nvs_get_str(nvs, "WIFI_SSID", wifiSSID, &len);
@@ -1259,7 +1448,7 @@ void processBLE(int timeout)
   } else if (!strcmp(cmd, "NET_OP")) {
     if (state.check(STATE_WIFI_CONNECTED)) {
 #if ENABLE_WIFI
-      n += snprintf(buf + n, bufsize - n, "%s", wifiSSID);
+      n += snprintf(buf + n, bufsize - n, "%s", wifiSSID[0] ? wifiSSID : "-");
 #endif
     } else {
       snprintf(buf + n, bufsize - n, "%s", netop.length() ? netop.c_str() : "-");
@@ -1279,14 +1468,16 @@ void processBLE(int timeout)
     n += snprintf(buf + n, bufsize - n, "%d", rssi);
 #if ENABLE_WIFI
   } else if (!strcmp(cmd, "SSID?")) {
-    n += snprintf(buf + n, bufsize - n, "%s", wifiSSID);
+    n += snprintf(buf + n, bufsize - n, "%s", wifiSSID[0] ? wifiSSID : "-");
   } else if (!strncmp(cmd, "SSID=", 5)) {
-    n += snprintf(buf + n, bufsize - n, nvs_set_str(nvs, "WIFI_SSID", cmd + 5) == ESP_OK ? "OK" : "ERR");
+    const char* p = cmd + 5;
+    n += snprintf(buf + n, bufsize - n, nvs_set_str(nvs, "WIFI_SSID", strcmp(p, "-") ? p : "") == ESP_OK ? "OK" : "ERR");
     loadConfig();
   } else if (!strcmp(cmd, "WPWD?")) {
-    n += snprintf(buf + n, bufsize - n, "%s", wifiPassword);
+    n += snprintf(buf + n, bufsize - n, "%s", wifiPassword[0] ? wifiPassword : "-");
   } else if (!strncmp(cmd, "WPWD=", 5)) {
-    n += snprintf(buf + n, bufsize - n, nvs_set_str(nvs, "WIFI_PWD", cmd + 5) == ESP_OK ? "OK" : "ERR");
+    const char* p = cmd + 5;
+    n += snprintf(buf + n, bufsize - n, nvs_set_str(nvs, "WIFI_PWD", strcmp(p, "-") ? p : "") == ESP_OK ? "OK" : "ERR");
     loadConfig();
 #else
   } else if (!strcmp(cmd, "SSID?") || !strcmp(cmd, "WPWD?")) {

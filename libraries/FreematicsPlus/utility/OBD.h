@@ -51,6 +51,7 @@
 #define PID_ENGINE_TORQUE_PERCENTAGE 0x62
 #define PID_ENGINE_REF_TORQUE 0x63
 #define PID_ODOMETER 0xA6
+#define PID_FUEL_TYPE 0x51
 
 typedef enum {
     PROTO_AUTO = 0x0,

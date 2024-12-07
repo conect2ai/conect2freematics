@@ -27,6 +27,8 @@ extern char vin[];
 extern GPS_DATA* gd;
 extern char isoTime[];
 
+long int time_server;
+bool time_server_obtained = false;
 CBuffer::CBuffer(uint8_t* mem)
 {
   m_data = mem;
@@ -99,9 +101,14 @@ void CBuffer::serialize(CStorage& store)
 void CBufferManager::init()
 {
   total = BUFFER_SLOTS;
+#if BOARD_HAS_PSRAM
+    slots = (CBuffer**)heap_caps_malloc(BUFFER_SLOTS * sizeof(void*), MALLOC_CAP_SPIRAM);
+#else
+    slots = (CBuffer**)malloc(BUFFER_SLOTS * sizeof(void*));
+#endif
   for (int n = 0; n < BUFFER_SLOTS; n++) {
     void* mem;
-#if HAS_LARGE_RAM
+#if BOARD_HAS_PSRAM
     mem = heap_caps_malloc(BUFFER_LENGTH, MALLOC_CAP_SPIRAM);
 #else
     mem = malloc(BUFFER_LENGTH);
@@ -547,8 +554,6 @@ bool TeleClientHTTP::transmit(const char* packetBuffer, unsigned int packetSize)
   char url[256];
   bool success = false;
   int len;
-  
-
 #if SERVER_METHOD == PROTOCOL_METHOD_GET
   if (gd && gd->ts) {
     len = snprintf(url, sizeof(url), "%s/push?id=%s&timestamp=%s&lat=%f&lon=%f&altitude=%d&speed=%f&heading=%d",
@@ -559,18 +564,21 @@ bool TeleClientHTTP::transmit(const char* packetBuffer, unsigned int packetSize)
   }
   success = cell.send(METHOD_GET, url, true);
 #else
+  // len = snprintf(url, sizeof(url), "%s/post/%s", SERVER_PATH, devid);
   if (strlen(USER_EMAIL) == 0 || USER_EMAIL == NULL)
   {
     len = snprintf(url, sizeof(url), "%s/post/%s/%s/%s", SERVER_PATH, devid, "unknown", vin);
   } else {
     len = snprintf(url, sizeof(url), "%s/post/%s/%s/%s", SERVER_PATH, devid, USER_EMAIL, vin);
   }
-  // len = snprintf(url, sizeof(url), "%s/post/%s/%s", SERVER_PATH, devid, USER_EMAIL);
+  // Serial.println("[HTTP] ");
+  // Serial.println(url);
+  // Serial.println("[TESTE] ");
   // Serial.println(url);
 #if ENABLE_WIFI
   if (wifi.connected()) {
-    // Serial.print("[WIFI] ");
-    // Serial.println(url);
+    Serial.print("[WIFI] ");
+    Serial.println(url);
     success = wifi.send(METHOD_POST, url, true, packetBuffer, packetSize);
   }
   else
@@ -610,6 +618,38 @@ bool TeleClientHTTP::transmit(const char* packetBuffer, unsigned int packetSize)
   }
   Serial.print("[HTTP] ");
   Serial.println(content);
+
+  char* start = strstr(content, ":");
+  char* end = strstr(content, "}");
+
+  // Verifica se o início e o fim da substring foram encontrados corretamente
+  if (start != nullptr && end != nullptr && !time_server_obtained) {
+      start++; // Avança um caractere para passar o ":"
+
+      // Calcula o tamanho da substring e adiciona espaço para o caractere nulo
+      int length = end - start - 3;
+
+      // Cria uma nova string com o tamanho correto e adiciona o caractere nulo
+      char time_server_str[length + 1];
+      strncpy(time_server_str, start, length);
+
+      // Adiciona o caractere nulo manualmente para garantir a terminação correta da string
+      time_server_str[length] = '\0';
+
+      Serial.print("[HTTP] Response time str: ");
+      Serial.println(time_server_str);
+      
+      // Converte a substring para um número long long
+      time_server = atoll(time_server_str);  // Use atoll para converter para long long
+      time_server_obtained = true;
+
+      Serial.print("[HTTP] Response time: ");
+      Serial.println(time_server);
+  } else {
+      Serial.println("[HTTP] Response time: 0");
+  }
+
+
 #if ENABLE_WIFI
   if ((wifi.connected() && wifi.code() == 200) || cell.code() == 200) {
 #else

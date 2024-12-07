@@ -13,8 +13,8 @@
 #ifdef CONFIG_STORAGE
 #define STORAGE CONFIG_STORAGE
 #endif
-#if CONFIG_BOARD_HAS_PSRAM
-#define BOARD_HAS_PSRAM CONFIG_BOARD_HAS_PSRAM
+#ifdef CONFIG_BOARD_HAS_PSRAM
+#define BOARD_HAS_PSRAM 1
 #endif
 #ifdef CONFIG_ENABLE_WIFI
 #define ENABLE_WIFI CONFIG_ENABLE_WIFI
@@ -39,16 +39,14 @@
 /**************************************
 * Circular Buffer Configuration
 **************************************/
-#ifdef BOARD_HAS_PSRAM
+#if BOARD_HAS_PSRAM
 #define BUFFER_SLOTS 1024 /* max number of buffer slots */
 #define BUFFER_LENGTH 384 /* bytes per slot */
 #define SERIALIZE_BUFFER_SIZE 4096 /* bytes */
-#define HAS_LARGE_RAM 1
 #else
 #define BUFFER_SLOTS 32 /* max number of buffer slots */
 #define BUFFER_LENGTH 256 /* bytes per slot */
 #define SERIALIZE_BUFFER_SIZE 1024 /* bytes */
-#define HAS_LARGE_RAM 0
 #endif
 
 /**************************************
@@ -69,7 +67,7 @@
 #define PROTOCOL_METHOD_GET 0
 #define PROTOCOL_METHOD_POST 1
 
-#define USER_EMAIL "email@email.com"
+#define USER_EMAIL "email@gmail.com"
 
 /**************************************
 * OBD-II configurations
@@ -87,15 +85,13 @@
 #ifndef ENABLE_WIFI
 #define ENABLE_WIFI 1
 // WiFi settings
-// #define WIFI_SSID "ba10"
-// #define WIFI_PASSWORD "ah16euy0"
-#define WIFI_SSID "WIFI_SSID"
-#define WIFI_PASSWORD "WIFI_PASSWORD"
+#define WIFI_SSID "FREEMATICS"
+#define WIFI_PASSWORD "PASSWORD"
 #endif 
 
 #ifndef SERVER_HOST
 // cellular network settings
-#define CELL_APN ""
+#define CELL_APN "claro.com.br"
 // Freematics Hub server settings
 #define SERVER_HOST "serverconect2ai.dca.ufrn.br"
 #define SERVER_PROTOCOL PROTOCOL_HTTP
@@ -106,7 +102,7 @@
 
 // HTTPS settings
 #define SERVER_METHOD PROTOCOL_METHOD_POST
-#define SERVER_PATH "/freematics"
+#define SERVER_PATH "/freematics2"
 
 #if !SERVER_PORT
 #undef SERVER_PORT
@@ -164,7 +160,7 @@
 #define GNSS GNSS_STANDALONE
 #endif
 // keeping GNSS power on during standby 
-#define GNSS_ALWAYS_ON 0
+#define GNSS_ALWAYS_ON 1
 // GNSS reset timeout while no signal
 #define GNSS_RESET_TIMEOUT 300 /* seconds */
 
